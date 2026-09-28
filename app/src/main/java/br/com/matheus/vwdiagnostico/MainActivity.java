@@ -221,7 +221,7 @@ public class MainActivity extends Activity implements BluetoothSppClient.Listene
                 this,
                 android.R.layout.simple_spinner_item,
                 labels.isEmpty()
-                        ? List.of("Nenhum dispositivo pareado")
+                        ? singletonLabel("Nenhum dispositivo pareado")
                         : labels);
 
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
@@ -386,6 +386,12 @@ public class MainActivity extends Activity implements BluetoothSppClient.Listene
         button.setText(value);
         button.setGravity(Gravity.CENTER);
         return button;
+    }
+
+    private List<String> singletonLabel(String value) {
+        List<String> values = new ArrayList<>();
+        values.add(value);
+        return values;
     }
 
     private LinearLayout.LayoutParams params() {
