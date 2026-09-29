@@ -24,11 +24,19 @@ public final class BluetoothSppClient {
     private static final UUID SPP_UUID =
             UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    /*
+     * Leitura e escrita precisam de executores diferentes.
+     *
+     * O loop de leitura fica bloqueado em InputStream.read() enquanto a
+     * conexão estiver ativa. Se a escrita usar o mesmo executor, os comandos
+     * enviados depois da conexão ficam presos na fila e nunca chegam ao ELM327.
+     */
+    private final ExecutorService readerExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService writerExecutor = Executors.newSingleThreadExecutor();
     private final Listener listener;
 
-    private BluetoothSocket socket;
-    private OutputStream outputStream;
+    private volatile BluetoothSocket socket;
+    private volatile OutputStream outputStream;
     private volatile boolean running;
 
     public BluetoothSppClient(Listener listener) {
@@ -37,7 +45,7 @@ public final class BluetoothSppClient {
 
     @SuppressLint("MissingPermission")
     public void connect(BluetoothDevice device) {
-        executor.execute(() -> {
+        readerExecutor.execute(() -> {
             closeInternal();
 
             try {
@@ -54,8 +62,10 @@ public final class BluetoothSppClient {
                 listener.onConnected();
 
                 byte[] buffer = new byte[4096];
+
                 while (running) {
                     int count = inputStream.read(buffer);
+
                     if (count < 0) {
                         break;
                     }
@@ -73,6 +83,7 @@ public final class BluetoothSppClient {
             } finally {
                 boolean wasRunning = running;
                 closeInternal();
+
                 if (wasRunning) {
                     listener.onDisconnected();
                 }
@@ -81,7 +92,7 @@ public final class BluetoothSppClient {
     }
 
     public void send(String command) {
-        executor.execute(() -> {
+        writerExecutor.execute(() -> {
             if (!isConnected()) {
                 listener.onError("O adaptador não está conectado.", null);
                 return;
@@ -93,8 +104,17 @@ public final class BluetoothSppClient {
             }
 
             try {
-                outputStream.write((normalized + "\r").getBytes(StandardCharsets.US_ASCII));
-                outputStream.flush();
+                OutputStream output = outputStream;
+
+                if (output == null) {
+                    listener.onError("Canal de escrita Bluetooth indisponível.", null);
+                    return;
+                }
+
+                output.write(
+                        (normalized + "\r")
+                                .getBytes(StandardCharsets.US_ASCII));
+                output.flush();
             } catch (IOException e) {
                 listener.onError("Falha ao enviar o comando.", e);
             }
@@ -102,30 +122,43 @@ public final class BluetoothSppClient {
     }
 
     public boolean isConnected() {
-        return running && socket != null && socket.isConnected() && outputStream != null;
+        BluetoothSocket currentSocket = socket;
+        return running
+                && currentSocket != null
+                && currentSocket.isConnected()
+                && outputStream != null;
     }
 
     public void close() {
-        executor.execute(this::closeInternal);
+        /*
+         * Não colocar o fechamento na fila do readerExecutor.
+         * O reader pode estar bloqueado em InputStream.read(). Fechar o socket
+         * diretamente interrompe o read e permite que a thread termine.
+         */
+        closeInternal();
     }
 
-    private void closeInternal() {
+    private synchronized void closeInternal() {
         running = false;
 
-        try {
-            if (outputStream != null) {
-                outputStream.close();
-            }
-        } catch (IOException ignored) {
-        }
+        OutputStream output = outputStream;
         outputStream = null;
 
         try {
-            if (socket != null) {
-                socket.close();
+            if (output != null) {
+                output.close();
             }
         } catch (IOException ignored) {
         }
+
+        BluetoothSocket currentSocket = socket;
         socket = null;
+
+        try {
+            if (currentSocket != null) {
+                currentSocket.close();
+            }
+        } catch (IOException ignored) {
+        }
     }
 }
